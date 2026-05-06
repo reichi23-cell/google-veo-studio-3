@@ -1,20 +1,24 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# google-veo-studio-3
 
-# Run and deploy your AI Studio app
+AI動画編集アプリ（バグあり・サポートなし）
 
-This contains everything you need to run your app locally.
+## 概要
+Google Veo APIを使ったAI動画生成・編集アプリです。
+生成した素材をタイムラインで編集することに特化しています。
 
-View your app in AI Studio: https://ai.studio/apps/38ee9ecf-0d6b-48cf-9cfa-6f08867f83c3
+## 主な機能
+- フォルダごと素材を読み込み
+- タイムラインへドラッグドロップで編集
+- 任意のフレームをキャプチャしてI2Vに投げて続きを生成
+- トラックごとに映像・音声を分離管理（V1-A1対応）
+- 👁️でトラックのON/OFFによるシーン分岐管理
 
-## Run Locally
+## インストール
+DMGをダウンロードしてインストールするだけ。
 
-**Prerequisites:**  Node.js
+## 必要なもの
+- Google AI StudioのAPIキー
+- UI内のAI生成機能はダミーです（実際の生成はVeo APIを別途使用）
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## ライセンス
+MIT - 自由に使用・改変してください。バグは自分で直してください。
