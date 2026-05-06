@@ -22,3 +22,6 @@ DMGをダウンロードしてインストールするだけ。
 
 ## ライセンス
 MIT - 自由に使用・改変してください。バグは自分で直してください。
+
+
+https://drive.google.com/file/d/13U36ogaAC6m6JaJLrNY4z-0W0wAwhn4e/view?usp=drive_link
