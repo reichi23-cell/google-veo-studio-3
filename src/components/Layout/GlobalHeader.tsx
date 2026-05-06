@@ -4,22 +4,27 @@
  */
 
 import React, { useRef } from 'react';
-import { Download, Save, Upload, Video, Undo2, Redo2 } from 'lucide-react';
+import { Download, Save, Upload, Video, Undo2, Redo2, Zap, Film } from 'lucide-react';
+import { FilmGrainLevel } from '../../utils/filmGrain';
 
 interface GlobalHeaderProps {
   projectName: string;
   setProjectName: (name: string) => void;
   onExport: () => void;
+  onFastExport: () => void;
   onSaveProject: () => void;
   onLoadProject: (event: React.ChangeEvent<HTMLInputElement>) => void;
   isExporting: boolean;
   exportProgress: number;
+  exportMode: 'canvas' | 'ffmpeg' | null;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
   canRedo: boolean;
   aspectRatio: '16:9' | '9:16';
   setAspectRatio: (ar: '16:9' | '9:16') => void;
+  filmGrain: FilmGrainLevel;
+  setFilmGrain: (v: FilmGrainLevel) => void;
 }
 
 export default function GlobalHeader({
@@ -27,7 +32,9 @@ export default function GlobalHeader({
   setProjectName,
   isExporting,
   exportProgress,
+  exportMode,
   onExport,
+  onFastExport,
   onSaveProject,
   onLoadProject,
   onUndo,
@@ -35,7 +42,9 @@ export default function GlobalHeader({
   canUndo,
   canRedo,
   aspectRatio,
-  setAspectRatio
+  setAspectRatio,
+  filmGrain,
+  setFilmGrain,
 }: GlobalHeaderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -92,6 +101,27 @@ export default function GlobalHeader({
           </button>
         </div>
 
+        {/* Film Grain */}
+        <div className="flex items-center gap-1 border border-white/5 rounded-xl p-1">
+          <Film size={10} className="text-zinc-600 ml-1 mr-0.5" />
+          {(['off', 'light', 'medium', 'heavy'] as FilmGrainLevel[]).map(level => (
+            <button
+              key={level}
+              onClick={() => setFilmGrain(level)}
+              title={level === 'off' ? 'Film Grain: Off' : `Film Grain: ${level}`}
+              className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all ${
+                filmGrain === level
+                  ? level === 'off'
+                    ? 'bg-white/10 text-zinc-300'
+                    : 'bg-amber-900/40 text-amber-300 border border-amber-700/50'
+                  : 'text-zinc-600 hover:text-zinc-400'
+              }`}
+            >
+              {level === 'off' ? 'Off' : level === 'light' ? 'L' : level === 'medium' ? 'M' : 'H'}
+            </button>
+          ))}
+        </div>
+
         <div className="flex items-center gap-1 border-l border-white/5 pl-4 ml-2">
           <button
             onClick={onSaveProject}
@@ -118,17 +148,40 @@ export default function GlobalHeader({
 
         <div className="h-6 w-px bg-white/5 mx-2" />
 
+        {/* Fast Export (ffmpeg) */}
+        <button
+          onClick={onFastExport}
+          disabled={isExporting}
+          title="ffmpegによる高速連結書き出し（再エンコードなし）"
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border ${
+            isExporting && exportMode === 'ffmpeg'
+              ? 'bg-green-600/20 text-green-400 border-green-500/30 cursor-not-allowed'
+              : isExporting
+              ? 'opacity-40 cursor-not-allowed border-white/5 text-zinc-600'
+              : 'border-green-500/30 text-green-400 hover:bg-green-500/10 hover:border-green-500/50 active:scale-95'
+          }`}
+        >
+          <Zap size={12} strokeWidth={3} />
+          {isExporting && exportMode === 'ffmpeg'
+            ? `Fast ${Math.round(exportProgress)}%`
+            : 'Fast Export'
+          }
+        </button>
+
+        {/* Standard Export (canvas renderer) */}
         <button
           onClick={onExport}
           disabled={isExporting}
           className={`flex items-center gap-3 px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all shadow-2xl ${
-            isExporting 
-              ? 'bg-blue-600/20 text-blue-400 cursor-not-allowed' 
+            isExporting && exportMode === 'canvas'
+              ? 'bg-blue-600/20 text-blue-400 cursor-not-allowed'
+              : isExporting
+              ? 'opacity-40 cursor-not-allowed bg-zinc-800 text-zinc-600'
               : 'bg-white text-black hover:bg-blue-500 hover:text-white active:scale-95'
           }`}
         >
           <Download size={14} strokeWidth={3} />
-          {isExporting ? `Exporting ${Math.round(exportProgress)}%` : 'Export'}
+          {isExporting && exportMode === 'canvas' ? `Exporting ${Math.round(exportProgress)}%` : 'Export'}
         </button>
       </div>
     </header>

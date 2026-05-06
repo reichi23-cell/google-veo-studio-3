@@ -21,7 +21,9 @@ import { usePlayback } from './hooks/usePlayback';
 import { useMediaManager } from './hooks/useMediaManager';
 import { useEditorState } from './hooks/useEditorState';
 import { renderTimeline } from './services/renderService';
+import { ffmpegExport } from './services/ffmpegExportService';
 import { getWaveformData, generateWaveformImage } from './utils/audioUtils';
+import { applyFilmGrain, FilmGrainLevel } from './utils/filmGrain';
 
 // --- Helper for Keyframes ---
 function getInterpolatedValue(keyframes: any[] | undefined, defaultValue: number, time: number): number {
@@ -74,8 +76,11 @@ export default function App() {
 
   // --- 3. UI & Layout State ---
   const [isExporting, setIsExporting] = useState(false);
+  const [exportMode, setExportMode] = useState<'canvas' | 'ffmpeg' | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
+  const [lowQualityPreview, setLowQualityPreview] = useState(false);
+  const [filmGrain, setFilmGrain] = useState<FilmGrainLevel>('off');
   const [activeTab, setActiveTab] = useState<'assets' | 'generate' | 'history'>('assets');
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [propertiesWidth, setPropertiesWidth] = useState(340);
@@ -170,18 +175,61 @@ export default function App() {
   // --- 6. Rendering Logic ---
   // clipsRef is already declared above - renderFrameAtTime uses it to avoid re-creation during drag
 
-  const renderFrameAtTime = useCallback((time: number, targetCanvas?: HTMLCanvasElement | OffscreenCanvas) => {
+  const renderFrameAtTime = useCallback(async (time: number, targetCanvas?: HTMLCanvasElement | OffscreenCanvas) => {
     const clips = clipsRef.current; // Always use latest clips without recreating callback
     const canvas = targetCanvas || canvasRef.current; if (!canvas) return;
-    const ctx = canvas.getContext('2d'); if (!ctx) return;
+    // OffscreenCanvas uses '2d' context directly (no DPR scaling needed)
+    const isOffscreen = !(canvas instanceof HTMLCanvasElement);
 
-    const dpr = (canvas instanceof HTMLCanvasElement) ? (window.devicePixelRatio || 1) : 1;
+    // --- PRE-SEEK PASS (for export only) ---
+    if (isOffscreen) {
+      const seekPromises: Promise<void>[] = [];
+      for (const clip of clips) {
+        if (hiddenTracks.includes(clip.track || 0)) continue;
+        const media = videoRefs.current[clip.id];
+        if (media && media instanceof HTMLVideoElement) {
+          const speed = clip.speed || 1;
+          const tStart = clip.trimStart || 0;
+          const tEnd = clip.trimEnd || 0;
+          const sTime = clip.startTime || 0;
+          const clipDuration = Math.max(0.01, (tEnd - tStart) / speed);
+
+          if (time >= sTime && time <= sTime + clipDuration) {
+            const it = (time - sTime) * speed + tStart;
+            const safeIt = Math.max(clip.trimStart || 0, Math.min(it, (clip.trimEnd || media.duration || 0) - 0.02));
+            if (isFinite(safeIt) && safeIt >= 0) {
+              if (Math.abs(media.currentTime - safeIt) > 0.05) {
+                seekPromises.push(new Promise<void>(resolve => {
+                  let isResolved = false;
+                  const handler = () => {
+                    if (isResolved) return;
+                    isResolved = true;
+                    media.removeEventListener('seeked', handler);
+                    resolve();
+                  };
+                  setTimeout(handler, 1000); // fallback timeout
+                  media.addEventListener('seeked', handler);
+                  media.currentTime = safeIt;
+                }));
+              }
+            }
+          }
+        }
+      }
+      if (seekPromises.length > 0) {
+        await Promise.all(seekPromises);
+      }
+    }
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    if (!ctx) return;
+
+    const dpr = isOffscreen ? 1 : (window.devicePixelRatio || 1);
     const viewWidth = canvas.width / dpr;
     const viewHeight = canvas.height / dpr;
 
     // Clear background
-    if (canvas instanceof HTMLCanvasElement) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (!isOffscreen) {
+      (ctx as CanvasRenderingContext2D).setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, viewWidth, viewHeight);
@@ -261,10 +309,9 @@ export default function App() {
             let mediaW = 0, mediaH = 0;
             if (media instanceof HTMLVideoElement) {
               mediaW = media.videoWidth; mediaH = media.videoHeight;
-              // Skip seeking during drag to prevent blackout from repeated async seeks.
-              // Also clamp `it` within [trimStart, trimEnd) to guard against speed≥2
-              // pushing the internal time beyond the valid range → black frame.
-              if (!isPlaying && !isDraggingRef.current) {
+              // During preview, seek only when paused and not dragging.
+              // During export (isOffscreen=true), the video was already seeked in the pre-pass.
+              if (!isOffscreen && !isPlaying && !isDraggingRef.current) {
                 const safeIt = Math.max(clip.trimStart || 0, Math.min(it, (clip.trimEnd || media.duration || 0) - 0.02));
                 if (isFinite(safeIt) && safeIt >= 0) media.currentTime = safeIt;
               }
@@ -309,8 +356,13 @@ export default function App() {
         ctx.restore();
       }
     }
+
+    // --- Film Grain (global, non-destructive overlay) ---
+    if (filmGrain !== 'off') {
+      applyFilmGrain(ctx as any, viewWidth, viewHeight, filmGrain);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoRefs, imageRefs, hiddenTracks, isPlaying]); // clips intentionally excluded - use clipsRef instead
+  }, [videoRefs, imageRefs, hiddenTracks, isPlaying, filmGrain]); // clips intentionally excluded - use clipsRef instead
 
   // Keep renderFrameRef always pointing to the latest renderFrameAtTime
   // so the RAF loop never needs to restart when the callback changes.
@@ -493,7 +545,7 @@ export default function App() {
 
       const assetId = `gen_${Date.now()}`;
       setAssets(prev => [{ id: assetId, name: prompt, type: 'video', url, duration: 8, thumbnail: sourceImage || '', isGenerated: true }, ...prev]);
-      setHistory(prev => [{ id: assetId, timestamp: new Date().toISOString(), prompt, resultUrl: url, type: 'video', isGenerated: true }, ...prev]);
+      setHistory(prev => [{ id: assetId, name: prompt, timestamp: new Date().toISOString(), prompt, resultUrl: url, type: 'video', duration: 8, isGenerated: true }, ...prev]);
     } catch (err: any) { alert("Generation failed: " + err.message); }
     finally { setIsGenerating(false); setGenerationProgress(0); }
   }, [apiKey, aspectRatio, setAssets, setHistory]);
@@ -524,83 +576,135 @@ export default function App() {
 
   const handleExport = useCallback(async () => {
     if (clips.length === 0) { alert("タイムラインが空です"); return; }
-    setIsExporting(true); setGenerationProgress(0);
+    setIsExporting(true); setExportMode('canvas'); setGenerationProgress(0);
     const controller = new AbortController(); abortControllerRef.current = controller;
 
-    // Create a temporary high-res canvas for rendering
+    // Dummy canvas to carry the aspect-ratio info to renderTimeline.
+    // The actual rendering goes to the OffscreenCanvas created inside renderTimeline.
     const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = 1920;
-    exportCanvas.height = 1080;
-    if (aspectRatio === '9:16') { exportCanvas.width = 1080; exportCanvas.height = 1920; }
+    exportCanvas.width = aspectRatio === '9:16' ? 1080 : 1920;
+    exportCanvas.height = aspectRatio === '9:16' ? 1920 : 1080;
 
-    setTimeout(async () => {
-      try {
-        const blob = await renderTimeline(clips, exportCanvas, (p) => setGenerationProgress(p), (t) => renderFrameAtTime(t, exportCanvas), controller.signal);
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `${projectName || 'project'}_export.mp4`;
-        link.click();
-
-        // Wait a bit before revoking to ensure download starts
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-
-        setHistory(prev => [{ id: `export_${Date.now()}`, name: `Export: ${projectName}`, timestamp: new Date().toISOString(), prompt: 'Export', resultUrl: url, duration, type: 'export', isGenerated: true }, ...prev]);
-      } catch (err: any) {
-        if (err.message !== "Export cancelled") alert("Export failed: " + err.message);
-      }
-      finally { setIsExporting(false); abortControllerRef.current = null; }
-    }, 100);
+    try {
+      const blob = await renderTimeline(
+        clips, exportCanvas,
+        (p) => setGenerationProgress(p),
+        (t, offscreen) => renderFrameAtTime(t, offscreen ?? exportCanvas),
+        controller.signal
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${projectName || 'project'}_export.mp4`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setHistory(prev => [{ id: `export_${Date.now()}`, name: `Export: ${projectName}`, timestamp: new Date().toISOString(), prompt: 'Export', resultUrl: url, duration, type: 'export', isGenerated: true }, ...prev]);
+    } catch (err: any) {
+      if (err.message !== "Export cancelled") alert("Export failed: " + err.message);
+    } finally {
+      setIsExporting(false); setExportMode(null); abortControllerRef.current = null;
+    }
   }, [clips, projectName, duration, aspectRatio, renderFrameAtTime, setHistory]);
+
+  /**
+   * ffmpeg.wasm による高速書き出し。
+   * 映像クリップを -c copy で再エンコードなしに連結し、BGM をミックスする。
+   * エフェクト（zoom/color 等）は反映されないため、シーンを事前に canvas Export して
+   * 素材化した後に使うことを想定。
+   */
+  const handleFastExport = useCallback(async () => {
+    if (clips.length === 0) { alert("タイムラインが空です"); return; }
+    const videoClips = clips.filter(c => c.type === 'video' || c.type === 'image');
+    if (videoClips.length === 0) { alert("映像クリップがありません"); return; }
+
+    setIsExporting(true); setExportMode('ffmpeg'); setGenerationProgress(0);
+    const controller = new AbortController(); abortControllerRef.current = controller;
+
+    try {
+      const blob = await ffmpegExport({
+        clips: clips.map(c => ({
+          url: c.url,
+          path: (c as any).path,
+          startTime: c.startTime,
+          trimStart: c.trimStart,
+          trimEnd: c.trimEnd,
+          speed: c.speed,
+          volume: c.volume,
+          type: c.type as 'video' | 'audio' | 'image',
+        })),
+        duration: projectEnd,
+        aspectRatio,
+        onProgress: (percent, message) => {
+          setGenerationProgress(percent);
+          console.log(`[FastExport] ${message}`);
+        },
+        abortSignal: controller.signal,
+      });
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${projectName || 'project'}_fast_export.mp4`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setHistory(prev => [{ id: `export_${Date.now()}`, name: `Fast Export: ${projectName}`, timestamp: new Date().toISOString(), prompt: 'Fast Export', resultUrl: url, duration: projectEnd, type: 'export', isGenerated: true }, ...prev]);
+    } catch (err: any) {
+      if (err.message !== 'Export cancelled') alert('Fast Export failed: ' + err.message);
+    } finally {
+      setIsExporting(false); setExportMode(null); abortControllerRef.current = null;
+    }
+  }, [clips, projectName, projectEnd, aspectRatio, setHistory]);
 
   const handleExportClip = useCallback(async (clipToExport: VideoClip) => {
     setIsExporting(true); setGenerationProgress(0);
     const controller = new AbortController(); abortControllerRef.current = controller;
 
     const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = 1920;
-    exportCanvas.height = 1080;
-    if (aspectRatio === '9:16') { exportCanvas.width = 1080; exportCanvas.height = 1920; }
+    exportCanvas.width = aspectRatio === '9:16' ? 1080 : 1920;
+    exportCanvas.height = aspectRatio === '9:16' ? 1920 : 1080;
 
     // Normalize clip to start at 0
     const normalizedClip = { ...clipToExport, startTime: 0 };
     const tempClips = [normalizedClip];
 
-    setTimeout(async () => {
-      try {
-        // Temporarily override the clip reference used by renderFrameAtTime
-        const originalClips = clipsRef.current;
-        clipsRef.current = tempClips;
+    // Temporarily override the clip reference used by renderFrameAtTime
+    const originalClips = clipsRef.current;
+    clipsRef.current = tempClips;
 
-        const blob = await renderTimeline(tempClips, exportCanvas, (p) => setGenerationProgress(p), (t) => renderFrameAtTime(t, exportCanvas), controller.signal);
-        clipsRef.current = originalClips; // Restore
+    try {
+      const blob = await renderTimeline(
+        tempClips, exportCanvas,
+        (p) => setGenerationProgress(p),
+        (t, offscreen) => renderFrameAtTime(t, offscreen ?? exportCanvas),
+        controller.signal
+      );
+      clipsRef.current = originalClips; // Restore
 
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        const safeName = clipToExport.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        link.download = `${safeName}_edited.mp4`;
-        link.click();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const safeName = clipToExport.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      link.download = `${safeName}_edited.mp4`;
+      link.click();
 
-        // Add to assets so it can be reused immediately
-        const assetDur = (clipToExport.trimEnd - clipToExport.trimStart) / clipToExport.speed;
-        const newAssetId = `asset_${Date.now()}`;
-        setAssets(prev => [{
-          id: newAssetId,
-          name: `${clipToExport.name} (Edited)`,
-          type: 'video',
-          url,
-          duration: assetDur,
-          thumbnail: '',
-          isGenerated: false
-        }, ...prev]);
-
-      } catch (err: any) {
-        if (err.message !== "Export cancelled") alert("Clip Export failed: " + err.message);
-        clipsRef.current = clips; // Ensure restored on error
-      }
-      finally { setIsExporting(false); abortControllerRef.current = null; }
-    }, 100);
+      // Add to assets so it can be reused immediately
+      const assetDur = (clipToExport.trimEnd - clipToExport.trimStart) / clipToExport.speed;
+      const newAssetId = `asset_${Date.now()}`;
+      setAssets(prev => [{
+        id: newAssetId,
+        name: `${clipToExport.name} (Edited)`,
+        type: 'video',
+        url,
+        duration: assetDur,
+        thumbnail: '',
+        isGenerated: false
+      }, ...prev]);
+    } catch (err: any) {
+      clipsRef.current = originalClips; // Restore on error
+      if (err.message !== "Export cancelled") alert("Clip Export failed: " + err.message);
+    } finally {
+      setIsExporting(false); abortControllerRef.current = null;
+    }
   }, [aspectRatio, renderFrameAtTime, setAssets, clips]);
 
   // --- 9. Keyboard Shortcuts ---
@@ -684,9 +788,11 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[#050505] text-zinc-300 font-sans overflow-hidden">
       <GlobalHeader
-        projectName={projectName} setProjectName={setProjectName} onExport={handleExport}
+        projectName={projectName} setProjectName={setProjectName} onExport={handleExport} onFastExport={handleFastExport}
         onSaveProject={() => { }} onLoadProject={() => { }} isExporting={isExporting} exportProgress={generationProgress}
+        exportMode={exportMode}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo} aspectRatio={aspectRatio} setAspectRatio={setAspectRatio}
+        filmGrain={filmGrain} setFilmGrain={setFilmGrain}
       />
       <div className="flex-1 flex min-h-0 relative">
         <SharedSidebar
@@ -708,6 +814,7 @@ export default function App() {
               togglePlayback={togglePlayback}
               setCurrentTime={setCurrentTime} setPlaybackRate={setPlaybackRate} clips={clips}
               selectedClipIds={selectedClipIds}
+              lowQualityPreview={lowQualityPreview} setLowQualityPreview={setLowQualityPreview}
               updateClipProp={(id, p, v) => {
                 setClips(prev => prev.map(c => {
                   if (c.id !== id) return c;
@@ -819,11 +926,22 @@ export default function App() {
             <div className="relative w-48 h-48 flex items-center justify-center">
               <svg className="w-full h-full -rotate-90">
                 <circle cx="96" cy="96" r="88" fill="none" stroke="currentColor" strokeWidth="6" className="text-white/5" />
-                <circle cx="96" cy="96" r="88" fill="none" stroke="currentColor" strokeWidth="6" strokeDasharray={552} strokeDashoffset={552 - (552 * generationProgress) / 100} strokeLinecap="round" className="text-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]" />
+                <circle cx="96" cy="96" r="88" fill="none" stroke="currentColor" strokeWidth="6" strokeDasharray={552} strokeDashoffset={552 - (552 * generationProgress) / 100} strokeLinecap="round"
+                  className={exportMode === 'ffmpeg' ? 'text-green-500 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'text-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]'}
+                />
               </svg>
               <span className="absolute text-5xl font-black text-white">{Math.round(generationProgress)}%</span>
             </div>
-            <h2 className="text-xl font-black uppercase tracking-[0.4em] text-blue-400">Rendering Video...</h2>
+            <h2 className={`text-xl font-black uppercase tracking-[0.4em] ${
+              exportMode === 'ffmpeg' ? 'text-green-400' : 'text-blue-400'
+            }`}>
+              {exportMode === 'ffmpeg' ? '⚡ Fast Exporting...' : 'Rendering Video...'}
+            </h2>
+            {exportMode === 'ffmpeg' && (
+              <p className="text-zinc-500 text-xs text-center">
+                ffmpeg で高速連結中（再エンコードなし）
+              </p>
+            )}
             <button onClick={() => abortControllerRef.current?.abort()} className="px-10 py-4 bg-zinc-900 hover:bg-red-600 text-zinc-400 hover:text-white rounded-2xl text-xs font-black uppercase tracking-widest transition-all">Cancel Export</button>
           </div>
         </div>

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { Play, Pause, SkipBack, Volume2, VolumeX, RotateCcw, Activity, Zap } from 'lucide-react';
+import { Play, Pause, SkipBack, Volume2, VolumeX, RotateCcw, Activity, Zap, Gauge } from 'lucide-react';
 import { formatTime } from '../../utils/timeUtils';
 import { VideoClip } from '../../types';
 
@@ -18,6 +18,9 @@ interface PreviewSectionProps {
   clips: VideoClip[];
   selectedClipIds: string[];
   updateClipProp: (id: string, prop: string, val: any) => void;
+  /** 1/2解像度プレビューモードの状態と切替 */
+  lowQualityPreview: boolean;
+  setLowQualityPreview: (v: boolean) => void;
 }
 
 export const PreviewSection: React.FC<PreviewSectionProps> = ({
@@ -34,7 +37,9 @@ export const PreviewSection: React.FC<PreviewSectionProps> = ({
   setPlaybackRate,
   clips,
   selectedClipIds,
-  updateClipProp
+  updateClipProp,
+  lowQualityPreview,
+  setLowQualityPreview,
 }) => {
   const [levels, setLevels] = useState({ master: 0, clips: 0, bgm: 0 });
   const rafRef = useRef<number>(0);
@@ -43,16 +48,17 @@ export const PreviewSection: React.FC<PreviewSectionProps> = ({
   const dragInfo = useRef<{ startX: number, startY: number, originalX: number, originalY: number } | null>(null);
 
   // Sync canvas resolution with display size
+  // lowQualityPreview が true のときは DPR を 0.5 倍にして描画ピクセル数を 1/4 に削減
   useEffect(() => {
     if (!containerRef.current || !canvasRef.current) return;
-    
+
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (entry && canvasRef.current) {
-        const dpr = window.devicePixelRatio || 1;
+        const dpr = (window.devicePixelRatio || 1) * (lowQualityPreview ? 0.5 : 1);
         const width = entry.contentRect.width;
         const height = entry.contentRect.height;
-        
+
         canvasRef.current.width = width * dpr;
         canvasRef.current.height = height * dpr;
         canvasRef.current.style.width = `${width}px`;
@@ -62,7 +68,18 @@ export const PreviewSection: React.FC<PreviewSectionProps> = ({
 
     observer.observe(containerRef.current);
     return () => observer.disconnect();
-  }, [canvasRef]);
+  }, [canvasRef, lowQualityPreview]);
+
+  // lowQualityPreview 変更時に即座にキャンバスサイズを更新
+  useEffect(() => {
+    if (!containerRef.current || !canvasRef.current) return;
+    const dpr = (window.devicePixelRatio || 1) * (lowQualityPreview ? 0.5 : 1);
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width > 0) {
+      canvasRef.current.width = rect.width * dpr;
+      canvasRef.current.height = rect.height * dpr;
+    }
+  }, [lowQualityPreview, canvasRef]);
 
   const { activeStatus, isDoubleSpeed } = useMemo(() => {
     const activeClips = clips.filter(c => currentTime >= c.startTime && currentTime <= (c.startTime + (c.trimEnd - c.trimStart) / c.speed));
@@ -176,6 +193,12 @@ export const PreviewSection: React.FC<PreviewSectionProps> = ({
         {/* Playback Controls */}
         <div className="flex items-center gap-4 px-6 py-3 bg-[#111]/80 backdrop-blur-2xl rounded-full border border-white/10 shadow-2xl relative">
           <div className="absolute -top-3 left-1/2 -translate-x-1/2 flex gap-2 z-50">
+            {lowQualityPreview && (
+              <div className="flex items-center gap-1 px-2 py-0.5 bg-amber-500/90 text-black rounded-md text-[9px] font-black shadow-[0_0_12px_rgba(245,158,11,0.4)]">
+                <Gauge size={10} />
+                1/2 RES
+              </div>
+            )}
             {playbackRate === 2 && (
               <div className="flex items-center gap-1 px-2 py-0.5 bg-blue-500 text-white rounded-md text-[9px] font-black animate-pulse shadow-[0_0_15px_rgba(59,130,246,0.4)]">
                 <Activity size={10} fill="currentColor" />
@@ -221,6 +244,22 @@ export const PreviewSection: React.FC<PreviewSectionProps> = ({
               / {formatTime(duration).split('.')[0]}
             </span>
           </div>
+
+          <div className="w-px h-4 bg-white/10 mx-2" />
+
+          {/* 1/2 解像度トグル */}
+          <button
+            onClick={() => setLowQualityPreview(!lowQualityPreview)}
+            title={lowQualityPreview ? 'フル解像度に戻す' : '1/2解像度（パフォーマンス優先）'}
+            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all ${
+              lowQualityPreview
+                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.2)]'
+                : 'text-zinc-600 hover:text-zinc-400 border border-white/5 hover:border-white/15'
+            }`}
+          >
+            <Gauge size={10} />
+            1/2
+          </button>
         </div>
       </div>
     </div>
