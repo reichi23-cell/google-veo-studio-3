@@ -7,7 +7,7 @@ const lines = content.split('\n');
 // Search for the line that looks like }))} and replace it
 for (let i = 1930; i < 1960; i++) {
     if (lines[i] && lines[i].includes('}))}')) {
-        console.log(`Found broken line at ${i+1}: ${lines[i]}`);
+        console.log(`Found broken line at ${i + 1}: ${lines[i]}`);
         lines[i] = lines[i].replace('}))}', ')})}');
     }
 }
