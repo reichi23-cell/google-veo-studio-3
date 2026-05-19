@@ -5,23 +5,18 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
-  Asset, VideoClip, HistoryItem
+  Asset, VideoClip
 } from './types';
 import GlobalHeader from './components/Layout/GlobalHeader';
 import SharedSidebar from './components/UI/SharedSidebar';
 import { PreviewSection } from './components/Editor/PreviewSection';
 import { PropertiesPanel } from './components/Editor/PropertiesPanel';
 import { Timeline } from './components/Editor/Timeline/Timeline';
-import GenerateWorkspace from './components/Generator/GenerateWorkspace';
-import { Download } from 'lucide-react';
-import * as GenAIModule from "@google/genai";
-const GoogleGenAI = GenAIModule ? ((GenAIModule as any).GoogleGenAI || (GenAIModule as any).default?.GoogleGenAI || (GenAIModule as any).GoogleGenerativeAI) : null;
 
 import { usePlayback } from './hooks/usePlayback';
 import { useMediaManager } from './hooks/useMediaManager';
 import { useEditorState } from './hooks/useEditorState';
 import { renderTimeline } from './services/renderService';
-import { ffmpegExport } from './services/ffmpegExportService';
 import { getWaveformData, generateWaveformImage } from './utils/audioUtils';
 import { applyFilmGrain, FilmGrainLevel } from './utils/filmGrain';
 
@@ -43,6 +38,110 @@ function getInterpolatedValue(keyframes: any[] | undefined, defaultValue: number
 
 import { RULER_HEIGHT } from './constants/layout';
 import { FrameExtractorModal } from './components/UI/FrameExtractorModal';
+
+const RECENT_DOWNLOAD_DAYS = 5;
+const MAX_AUTO_IMPORT_ASSETS = 120;
+const MEDIA_EXTENSIONS = new Set([
+  '.mp4', '.mov', '.webm', '.m4v',
+  '.png', '.jpg', '.jpeg', '.webp',
+  '.mp3', '.wav', '.m4a', '.aac'
+]);
+
+function getMediaType(filePath: string): Asset['type'] | null {
+  const ext = filePath.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
+  if (['.mp4', '.mov', '.webm', '.m4v'].includes(ext)) return 'video';
+  if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) return 'image';
+  if (['.mp3', '.wav', '.m4a', '.aac'].includes(ext)) return 'audio';
+  return null;
+}
+
+function getFileUrl(filePath: string): string {
+  if ((window as any).require) {
+    return `media-file://local/${encodeURIComponent(filePath)}`;
+  }
+  return `file://${filePath}`;
+}
+
+function getRecentDownloadPaths(): string[] {
+  const nodeRequire = (window as any).require;
+  if (!nodeRequire) return [];
+
+  const fs = nodeRequire('fs');
+  const path = nodeRequire('path');
+  const os = nodeRequire('os');
+  const downloadsDir = path.join(os.homedir(), 'Downloads');
+  const cutoff = Date.now() - RECENT_DOWNLOAD_DAYS * 24 * 60 * 60 * 1000;
+  const results: Array<{ filePath: string; mtimeMs: number }> = [];
+
+  const scan = (dir: string, depth: number) => {
+    if (depth > 4 || results.length >= MAX_AUTO_IMPORT_ASSETS * 2) return;
+
+    let entries: any[] = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      let stat: any;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        if (depth === 0 || stat.mtimeMs >= cutoff || /\d{4}-\d{2}-\d{2}/.test(entry.name)) {
+          scan(fullPath, depth + 1);
+        }
+        continue;
+      }
+
+      if (stat.mtimeMs < cutoff || !MEDIA_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      results.push({ filePath: fullPath, mtimeMs: stat.mtimeMs });
+    }
+  };
+
+  scan(downloadsDir, 0);
+
+  return results
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, MAX_AUTO_IMPORT_ASSETS)
+    .map(item => item.filePath);
+}
+
+function probeMedia(url: string, type: Asset['type']): Promise<{ duration: number; width?: number; height?: number; aspectRatio?: number }> {
+  return new Promise(resolve => {
+    if (type === 'image') {
+      const img = new Image();
+      img.onload = () => resolve({
+        duration: 5,
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+        aspectRatio: img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : undefined
+      });
+      img.onerror = () => resolve({ duration: 5 });
+      img.src = url;
+      return;
+    }
+
+    const media = type === 'video' ? document.createElement('video') : new Audio();
+    media.preload = 'metadata';
+    media.onloadedmetadata = () => {
+      const video = media as HTMLVideoElement;
+      resolve({
+        duration: Number.isFinite(media.duration) ? media.duration : 5,
+        width: type === 'video' ? video.videoWidth : undefined,
+        height: type === 'video' ? video.videoHeight : undefined,
+        aspectRatio: type === 'video' && video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : undefined
+      });
+    };
+    media.onerror = () => resolve({ duration: 5 });
+    media.src = url;
+  });
+}
 
 export default function App() {
   // --- 1. Central Editor State (with Undo/Redo) ---
@@ -76,12 +175,10 @@ export default function App() {
 
   // --- 3. UI & Layout State ---
   const [isExporting, setIsExporting] = useState(false);
-  const [exportMode, setExportMode] = useState<'canvas' | 'ffmpeg' | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
   const [lowQualityPreview, setLowQualityPreview] = useState(false);
   const [filmGrain, setFilmGrain] = useState<FilmGrainLevel>('off');
-  const [activeTab, setActiveTab] = useState<'assets' | 'generate' | 'history'>('assets');
+  const [activeTab, setActiveTab] = useState<'assets' | 'history'>('assets');
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const [propertiesWidth, setPropertiesWidth] = useState(340);
   const [timelineHeight, setTimelineHeight] = useState(480);
@@ -118,7 +215,6 @@ export default function App() {
     return tops;
   }, [trackHeights]);
 
-  const [apiKey, setApiKey] = useState('');
   const abortControllerRef = useRef<AbortController | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const objectUrlsRef = useRef<string[]>([]);
@@ -143,6 +239,51 @@ export default function App() {
       objectUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
     };
   }, []);
+
+  // Electron-only: mount recent generated media from Downloads on startup.
+  useEffect(() => {
+    if (!(window as any).require) return;
+
+    let isCancelled = false;
+    const loadRecentDownloads = async () => {
+      const filePaths = getRecentDownloadPaths();
+      if (filePaths.length === 0) return;
+
+      const nextAssets = await Promise.all(filePaths.map(async (filePath): Promise<Asset | null> => {
+        const type = getMediaType(filePath);
+        if (!type) return null;
+
+        const url = getFileUrl(filePath);
+        const metadata = await probeMedia(url, type);
+        const name = filePath.split(/[\\/]/).pop() || filePath;
+
+        return {
+          id: `download_${filePath}`,
+          name,
+          type,
+          url,
+          duration: metadata.duration,
+          thumbnail: type === 'image' ? url : '',
+          isLocal: true,
+          width: metadata.width,
+          height: metadata.height,
+          aspectRatio: metadata.aspectRatio,
+          path: filePath
+        } satisfies Asset;
+      }));
+
+      if (isCancelled) return;
+      const validAssets = nextAssets.filter((asset): asset is Asset => Boolean(asset));
+      setAssets(prev => {
+        const existingPaths = new Set(prev.map(asset => asset.path).filter(Boolean));
+        const fresh = validAssets.filter(asset => !existingPaths.has(asset.path));
+        return fresh.length > 0 ? [...fresh, ...prev] : prev;
+      });
+    };
+
+    loadRecentDownloads();
+    return () => { isCancelled = true; };
+  }, [setAssets]);
 
   // Waveform Generation
   useEffect(() => {
@@ -482,101 +623,10 @@ export default function App() {
     });
   }, [pushToHistory, currentTime, setAssets, setClips]);
 
-  // --- 8. Export & Generation ---
-  const onTranslate = useCallback(async (text: string) => {
-    if (!apiKey) return text;
-    try {
-      const genAI = new GoogleGenAI({ apiKey });
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-      const result = await model.generateContent(`Translate the following to English, only return the translation: ${text}`);
-      return result.response.text().trim();
-    } catch (e) { return text; }
-  }, [apiKey]);
-
-  const onAnalyzeVisual = useCallback(async (url: string) => {
-    if (!apiKey) return "シネマティックな映像";
-    try {
-      const genAI = new GoogleGenAI({ apiKey });
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-      const res = await fetch(url);
-      const blob = await res.blob();
-      const buffer = await blob.arrayBuffer();
-      const result = await model.generateContent([
-        "Describe this visual scene in detail for an AI video prompt, focusing on mood and action:",
-        { inlineData: { data: btoa(String.fromCharCode(...new Uint8Array(buffer))), mimeType: blob.type } }
-      ]);
-      return result.response.text().trim();
-    } catch (e) { return "シネマティックな映像"; }
-  }, [apiKey]);
-
-  const onGenerateVideo = useCallback(async (prompt: string, sourceImage?: string | null) => {
-    if (!apiKey) { alert("API Keyが必要です"); return; }
-    setIsGenerating(true); setGenerationProgress(10);
-    try {
-      const genAI = new GoogleGenAI({ apiKey });
-      // Mocking Veo call as @google/genai might not have direct Veo 2.0 support in all versions
-      // Using a fallback strategy
-      const model = (genAI as any).getGenerativeModel({ model: 'veo-2.0-generate-001' });
-      const config = {
-        durationSeconds: 8,
-        aspectRatio: aspectRatio === '16:9' ? '16:9' : '9:16',
-      };
-
-      let res;
-      if (sourceImage) {
-        const base64 = sourceImage.split(',')[1];
-        res = await model.generateVideos({ prompt, image: { imageBytes: base64, mimeType: 'image/jpeg' }, config });
-      } else {
-        res = await model.generateVideos({ prompt, config });
-      }
-
-      let operation = res;
-      while (!operation.done) {
-        await new Promise(r => setTimeout(r, 3000));
-        operation = await (genAI as any).operations.getVideosOperation({ name: operation.name });
-        setGenerationProgress(prev => Math.min(95, prev + 5));
-      }
-
-      const video = operation.response.generatedVideos[0].video;
-      const videoUrl = `${video.uri}&key=${apiKey}`;
-      const videoRes = await fetch(videoUrl);
-      const blob = await videoRes.blob();
-      const url = URL.createObjectURL(blob);
-
-      const assetId = `gen_${Date.now()}`;
-      setAssets(prev => [{ id: assetId, name: prompt, type: 'video', url, duration: 8, thumbnail: sourceImage || '', isGenerated: true }, ...prev]);
-      setHistory(prev => [{ id: assetId, name: prompt, timestamp: new Date().toISOString(), prompt, resultUrl: url, type: 'video', duration: 8, isGenerated: true }, ...prev]);
-    } catch (err: any) { alert("Generation failed: " + err.message); }
-    finally { setIsGenerating(false); setGenerationProgress(0); }
-  }, [apiKey, aspectRatio, setAssets, setHistory]);
-
-  const onGenerateImage = useCallback(async (prompt: string, sourceImage: string | null, sourceAsset: Asset | null, ar: string) => {
-    if (!apiKey) { alert("API Keyが必要です"); return; }
-    setIsGenerating(true); setGenerationProgress(30);
-    try {
-      const genAI = new GoogleGenAI({ apiKey });
-      const model = genAI.getGenerativeModel({ model: "imagen-3" });
-      const result = await model.generateContent(prompt);
-      const url = result.response.text(); // Placeholder for actual image URL logic
-      const assetId = `img_${Date.now()}`;
-      setAssets(prev => [{ id: assetId, name: prompt, type: 'image', url, duration: 5, thumbnail: url, isGenerated: true }, ...prev]);
-    } catch (err: any) { alert("Image generation failed: " + err.message); }
-    finally { setIsGenerating(false); setGenerationProgress(0); }
-  }, [apiKey, setAssets]);
-
-  const onGenerateAudio = useCallback(async (prompt: string, dur: number, autoPlace?: boolean) => {
-    if (!apiKey) { alert("API Keyが必要です"); return; }
-    setIsGenerating(true); setGenerationProgress(20);
-    try {
-      // Audio generation implementation would go here
-      // For now, providing a placeholder message
-      alert("Audio generation starting: " + prompt);
-    } finally { setIsGenerating(false); setGenerationProgress(0); }
-  }, [apiKey]);
-
+  // --- 8. Export ---
   const handleExport = useCallback(async () => {
     if (clips.length === 0) { alert("タイムラインが空です"); return; }
-    setIsExporting(true); setExportMode('canvas'); setGenerationProgress(0);
+    setIsExporting(true); setGenerationProgress(0);
     const controller = new AbortController(); abortControllerRef.current = controller;
 
     // Dummy canvas to carry the aspect-ratio info to renderTimeline.
@@ -602,58 +652,9 @@ export default function App() {
     } catch (err: any) {
       if (err.message !== "Export cancelled") alert("Export failed: " + err.message);
     } finally {
-      setIsExporting(false); setExportMode(null); abortControllerRef.current = null;
+      setIsExporting(false); abortControllerRef.current = null;
     }
   }, [clips, projectName, duration, aspectRatio, renderFrameAtTime, setHistory]);
-
-  /**
-   * ffmpeg.wasm による高速書き出し。
-   * 映像クリップを -c copy で再エンコードなしに連結し、BGM をミックスする。
-   * エフェクト（zoom/color 等）は反映されないため、シーンを事前に canvas Export して
-   * 素材化した後に使うことを想定。
-   */
-  const handleFastExport = useCallback(async () => {
-    if (clips.length === 0) { alert("タイムラインが空です"); return; }
-    const videoClips = clips.filter(c => c.type === 'video' || c.type === 'image');
-    if (videoClips.length === 0) { alert("映像クリップがありません"); return; }
-
-    setIsExporting(true); setExportMode('ffmpeg'); setGenerationProgress(0);
-    const controller = new AbortController(); abortControllerRef.current = controller;
-
-    try {
-      const blob = await ffmpegExport({
-        clips: clips.map(c => ({
-          url: c.url,
-          path: (c as any).path,
-          startTime: c.startTime,
-          trimStart: c.trimStart,
-          trimEnd: c.trimEnd,
-          speed: c.speed,
-          volume: c.volume,
-          type: c.type as 'video' | 'audio' | 'image',
-        })),
-        duration: projectEnd,
-        aspectRatio,
-        onProgress: (percent, message) => {
-          setGenerationProgress(percent);
-          console.log(`[FastExport] ${message}`);
-        },
-        abortSignal: controller.signal,
-      });
-
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${projectName || 'project'}_fast_export.mp4`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      setHistory(prev => [{ id: `export_${Date.now()}`, name: `Fast Export: ${projectName}`, timestamp: new Date().toISOString(), prompt: 'Fast Export', resultUrl: url, duration: projectEnd, type: 'export', isGenerated: true }, ...prev]);
-    } catch (err: any) {
-      if (err.message !== 'Export cancelled') alert('Fast Export failed: ' + err.message);
-    } finally {
-      setIsExporting(false); setExportMode(null); abortControllerRef.current = null;
-    }
-  }, [clips, projectName, projectEnd, aspectRatio, setHistory]);
 
   const handleExportClip = useCallback(async (clipToExport: VideoClip) => {
     setIsExporting(true); setGenerationProgress(0);
@@ -788,9 +789,8 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[#050505] text-zinc-300 font-sans overflow-hidden">
       <GlobalHeader
-        projectName={projectName} setProjectName={setProjectName} onExport={handleExport} onFastExport={handleFastExport}
+        projectName={projectName} setProjectName={setProjectName} onExport={handleExport}
         onSaveProject={() => { }} onLoadProject={() => { }} isExporting={isExporting} exportProgress={generationProgress}
-        exportMode={exportMode}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo} aspectRatio={aspectRatio} setAspectRatio={setAspectRatio}
         filmGrain={filmGrain} setFilmGrain={setFilmGrain}
       />
@@ -799,11 +799,10 @@ export default function App() {
           assets={assets} selectedAssetIds={selectedAssetIds} setSelectedAssetIds={setSelectedAssetIds} history={history}
           handleFileUpload={(e: React.ChangeEvent<HTMLInputElement>) => processFiles(e.target.files || [], { addToTimeline: false })}
           processFiles={(files: File[]) => processFiles(files, { addToTimeline: false })}
-          addTextToTimeline={addTextToTimeline} width={sidebarWidth} isGenerating={isGenerating} generationProgress={generationProgress}
-          onGenerateVideo={onGenerateVideo} onGenerateAudio={onGenerateAudio} onCaptureFrame={() => canvasRef.current?.toDataURL() || null}
-          onAnalyzeTimeline={() => { }} onDeleteAsset={(id) => setAssets(prev => prev.filter(a => a.id !== id))}
+          addTextToTimeline={addTextToTimeline} width={sidebarWidth}
+          onDeleteAsset={(id) => setAssets(prev => prev.filter(a => a.id !== id))}
           onExtractFrame={(asset) => setExtractingMedia({ url: asset.url, name: asset.name })}
-          onDeleteHistory={(id) => setHistory(prev => prev.filter(h => h.id !== id))} sidebarTab={activeTab} onSidebarTabChange={setActiveTab} aspectRatio={aspectRatio}
+          onDeleteHistory={(id) => setHistory(prev => prev.filter(h => h.id !== id))} sidebarTab={activeTab} onSidebarTabChange={setActiveTab}
         />
         <div className="w-1 hover:w-1.5 bg-white/5 hover:bg-blue-500/50 cursor-col-resize z-50 transition-all" onMouseDown={() => setIsResizingSidebar(true)} />
         <div className="flex-1 flex flex-col min-w-0 bg-[#0a0a0a]">
@@ -888,12 +887,15 @@ export default function App() {
                   />
                 </div>
               ) : (
-                <GenerateWorkspace
-                  assets={assets} history={history} isGenerating={isGenerating} generationProgress={generationProgress}
-                  onGenerateVideo={onGenerateVideo} onGenerateAudio={onGenerateAudio} onGenerateImage={onGenerateImage}
-                  onTranslate={onTranslate} onAnalyzeVisual={onAnalyzeVisual} onCaptureFrame={() => canvasRef.current?.toDataURL() || null}
-                  addAsset={a => setAssets(p => [a, ...p])} apiKey={apiKey} setApiKey={setApiKey}
-                />
+                <div className="h-full min-h-[320px] flex flex-col items-center justify-center p-8 text-center">
+                  <div className="w-12 h-12 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center mb-5">
+                    <span className="text-zinc-500 text-lg font-black">I</span>
+                  </div>
+                  <h2 className="text-xs font-black uppercase tracking-[0.25em] text-zinc-400">Inspector</h2>
+                  <p className="mt-3 max-w-[220px] text-[11px] leading-relaxed text-zinc-600">
+                    Select one clip to adjust transform, timing, color, audio, and keyframes.
+                  </p>
+                </div>
               )}
             </div>
           </div>
@@ -927,21 +929,12 @@ export default function App() {
               <svg className="w-full h-full -rotate-90">
                 <circle cx="96" cy="96" r="88" fill="none" stroke="currentColor" strokeWidth="6" className="text-white/5" />
                 <circle cx="96" cy="96" r="88" fill="none" stroke="currentColor" strokeWidth="6" strokeDasharray={552} strokeDashoffset={552 - (552 * generationProgress) / 100} strokeLinecap="round"
-                  className={exportMode === 'ffmpeg' ? 'text-green-500 shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'text-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]'}
+                  className="text-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]"
                 />
               </svg>
               <span className="absolute text-5xl font-black text-white">{Math.round(generationProgress)}%</span>
             </div>
-            <h2 className={`text-xl font-black uppercase tracking-[0.4em] ${
-              exportMode === 'ffmpeg' ? 'text-green-400' : 'text-blue-400'
-            }`}>
-              {exportMode === 'ffmpeg' ? '⚡ Fast Exporting...' : 'Rendering Video...'}
-            </h2>
-            {exportMode === 'ffmpeg' && (
-              <p className="text-zinc-500 text-xs text-center">
-                ffmpeg で高速連結中（再エンコードなし）
-              </p>
-            )}
+            <h2 className="text-xl font-black uppercase tracking-[0.4em] text-blue-400">Rendering Video...</h2>
             <button onClick={() => abortControllerRef.current?.abort()} className="px-10 py-4 bg-zinc-900 hover:bg-red-600 text-zinc-400 hover:text-white rounded-2xl text-xs font-black uppercase tracking-widest transition-all">Cancel Export</button>
           </div>
         </div>

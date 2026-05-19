@@ -4,19 +4,17 @@
  */
 
 import React, { useRef } from 'react';
-import { Download, Save, Upload, Video, Undo2, Redo2, Zap, Film } from 'lucide-react';
+import { Download, Save, Upload, Video, Undo2, Redo2, Film } from 'lucide-react';
 import { FilmGrainLevel } from '../../utils/filmGrain';
 
 interface GlobalHeaderProps {
   projectName: string;
   setProjectName: (name: string) => void;
   onExport: () => void;
-  onFastExport: () => void;
   onSaveProject: () => void;
   onLoadProject: (event: React.ChangeEvent<HTMLInputElement>) => void;
   isExporting: boolean;
   exportProgress: number;
-  exportMode: 'canvas' | 'ffmpeg' | null;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -32,9 +30,7 @@ export default function GlobalHeader({
   setProjectName,
   isExporting,
   exportProgress,
-  exportMode,
   onExport,
-  onFastExport,
   onSaveProject,
   onLoadProject,
   onUndo,
@@ -148,40 +144,18 @@ export default function GlobalHeader({
 
         <div className="h-6 w-px bg-white/5 mx-2" />
 
-        {/* Fast Export (ffmpeg) */}
-        <button
-          onClick={onFastExport}
-          disabled={isExporting}
-          title="ffmpegによる高速連結書き出し（再エンコードなし）"
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border ${
-            isExporting && exportMode === 'ffmpeg'
-              ? 'bg-green-600/20 text-green-400 border-green-500/30 cursor-not-allowed'
-              : isExporting
-              ? 'opacity-40 cursor-not-allowed border-white/5 text-zinc-600'
-              : 'border-green-500/30 text-green-400 hover:bg-green-500/10 hover:border-green-500/50 active:scale-95'
-          }`}
-        >
-          <Zap size={12} strokeWidth={3} />
-          {isExporting && exportMode === 'ffmpeg'
-            ? `Fast ${Math.round(exportProgress)}%`
-            : 'Fast Export'
-          }
-        </button>
-
         {/* Standard Export (canvas renderer) */}
         <button
           onClick={onExport}
           disabled={isExporting}
           className={`flex items-center gap-3 px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all shadow-2xl ${
-            isExporting && exportMode === 'canvas'
+            isExporting
               ? 'bg-blue-600/20 text-blue-400 cursor-not-allowed'
-              : isExporting
-              ? 'opacity-40 cursor-not-allowed bg-zinc-800 text-zinc-600'
               : 'bg-white text-black hover:bg-blue-500 hover:text-white active:scale-95'
           }`}
         >
           <Download size={14} strokeWidth={3} />
-          {isExporting && exportMode === 'canvas' ? `Exporting ${Math.round(exportProgress)}%` : 'Export'}
+          {isExporting ? `Exporting ${Math.round(exportProgress)}%` : 'Export'}
         </button>
       </div>
     </header>

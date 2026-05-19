@@ -1,6 +1,19 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'media-file',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true
+    }
+  }
+]);
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -46,6 +59,12 @@ ipcMain.handle('save-file', async (event, { filePath, buffer }) => {
 });
 
 app.whenReady().then(() => {
+  protocol.handle('media-file', (request) => {
+    const url = new URL(request.url);
+    const filePath = decodeURIComponent(url.pathname.slice(1));
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+
   createWindow();
 
   app.on('activate', function () {
